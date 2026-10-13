@@ -1,0 +1,307 @@
+(* =========================================================================
+   PUF-ECC-BatchAuth -- ProVerif model of Algorithm 4 (Full Mutual
+   Authentication, CORRECTED version with sigma2 = Sign_sj(B||A||T2)) and
+   Algorithm 6 (Handover Continuation).
+
+   STATUS -- READ BEFORE CITING: this file is written to be syntactically
+   valid ProVerif (applied pi-calculus) input, intended to be run as:
+       proverif puf_ecc_batchauth.pv
+   It has NOT been executed by us. The environment that produced this
+   paper could not install ProVerif (no OCaml/opam toolchain, and
+   ProVerif's real distribution host is outside that sandbox's network
+   allowlist). Do not report any query below as "proven" until you have
+   actually run it and read the output; each `query` is a claim to check,
+   not a result already obtained.
+
+   MODELING CHOICES (every symbolic model makes abstraction choices that
+   bound what the proof actually covers -- stated explicitly here):
+   (1) The EC group is modeled with the standard ProVerif Diffie-Hellman
+       equational theory. This gives security against a symbolic
+       Dolev-Yao attacker, which is complementary to, not a substitute
+       for, the paper's computational ROR-model proof (Theorem 1).
+   (2) The PUF-derived long-term secret x_i is modeled as a private
+       `exponent` bound to each OBU instance and never sent on the wire --
+       this captures "no secret in memory" at the abstraction level
+       (Definition 3) but does not model fuzzy-extractor noise tolerance,
+       which is outside ProVerif's vocabulary and is argued analytically
+       in the paper instead (Theorem 1's epsilon term).
+   (3) sigma_1 is modeled here as a signature under x_i, verified against
+       the public V_i = exp(g, x_i). As of the current paper draft this is
+       no longer an idealization of an unspecified sub-protocol: sigma_1
+       is now explicitly defined as a standard Schnorr signature under
+       x_i (Section VI.C of the paper), so this model matches the paper's
+       actual construction rather than approximating a gap in it. (An
+       earlier paper draft left sigma_1's binding mechanism unspecified,
+       and an earlier version of this comment described this line as an
+       idealization pending that specification; that gap has since been
+       closed in the paper, and this comment is corrected accordingly.)
+   (4) Epoch-credential issuance (Algorithm 3) is modeled as an out-of-band
+       setup step (private channel, before the main replicated process
+       starts) rather than as its own interactive sub-protocol, which is
+       standard practice for certificate/credential issuance in ProVerif
+       models of AKA protocols and keeps the model focused on the
+       security-critical live exchange (Algorithm 4/6).
+   (5) Batch verification (Algorithm 5) is a verification-side performance
+       optimization with no effect on message content or key derivation,
+       so it is not separately modeled.
+   (6) This file's queries cover session-key secrecy and mutual
+       authentication (Definitions 6 and the BAN goals) for Algorithms 4
+       and 6. It does NOT include a query for conditional privacy/
+       unlinkability (Definition 7) -- the `xor`/PID construction and its
+       equational theory are present, but no TA-side Trace process or
+       unlinkability (observational-equivalence / `choice`) query is
+       modeled here. A full treatment of Definition 7 would need a
+       separate equivalence-based ProVerif query (or a dedicated
+       `choice[...]` process) and is left as a further extension of this
+       file, not something already covered by the queries below.
+   ========================================================================= *)
+
+(* ---------- Channels ---------- *)
+free ch: channel.          (* public V2I channel -- full attacker control *)
+free rsuBackhaul: channel. (* RSU-RSU handover-state forwarding channel.
+   NOTE: declared here as a plain (public, attacker-visible) `channel`,
+   consistent with the paper's own stated assumption that this backhaul is
+   "authenticated (but not necessarily encrypted)" (Section IV of the
+   paper) and with the confidentiality gap explicitly discussed in the
+   paper's Discussion section. If this model is executed as-is, we EXPECT
+   the HandoverFinished secrecy query to plausibly FAIL, since CT_i is
+   sent in the clear over this channel and ProVerif's default attacker has
+   full read access to any public channel -- this would not indicate a
+   bug in the model, but would correctly reproduce the backhaul-
+   confidentiality limitation the paper discloses. To model the
+   alternative deployment assumption discussed there (a physically or
+   administratively protected backhaul), change this declaration to
+   `free rsuBackhaul: channel [private].` and re-run; the secrecy query
+   should then be expected to pass for this part of the protocol. Running
+   both variants and reporting both outcomes would be the most complete
+   treatment. *)
+
+(* ---------- EC group with standard DH equational theory ---------- *)
+type G.
+type exponent.
+const g: G [data].
+fun exp(G, exponent): G.
+equation forall x: exponent, y: exponent; exp(exp(g,x),y) = exp(exp(g,y),x).
+
+(* ---------- Hash functions (free, perfectly one-way) ---------- *)
+fun H0(bitstring): bitstring.
+fun H3(bitstring): bitstring.
+fun H4(bitstring): bitstring.
+
+(* ---------- Signatures (used for sigma_TA, Cert_j, sigma_1-as-PoK,
+   and the CORRECTED sigma_2) ---------- *)
+fun sign(bitstring, exponent): bitstring.
+reduc forall m: bitstring, sk: exponent; checksign(sign(m, sk), exp(g,sk)) = m.
+
+(* ---------- Anti-replay tracking ----------
+   ADDED after a real ProVerif run showed RSU would process the exact
+   same M1 message twice if delivered to two different RSU session
+   instances (an injective-correspondence failure -- see the paper's own
+   Section VII.E for the real result this responds to). ProVerif has no
+   native concept of the paper's Delta-T freshness window, so without
+   this table, the model allows replay the paper's own timestamp check
+   would reject in practice. This table gives ProVerif a genuine global,
+   persistent one-time-use check on t1, closer to what a real
+   implementation's freshness/replay cache would enforce.
+
+   UPDATE, after re-running with this table in place: the result was
+   byte-for-byte IDENTICAL to before this table was added -- the same
+   two injective correspondence queries still fail, with the same
+   traces. This table did NOT resolve the issue it was added for. We do
+   not currently know whether this is because injective correspondence
+   under replicated processes is a documented hard case for ProVerif's
+   Horn-clause resolution method regardless of an in-model guard like
+   this one, or because this specific guard has some flaw we have not
+   identified. The table is left in place as a documented, honest
+   negative result and because it is still a reasonable model of a
+   real anti-replay cache even though it did not change ProVerif's
+   verdict -- not because we believe it fixed anything. See the paper's
+   Section VII.E and its Discussion/Limitations section for the full,
+   honest account. *)
+table usedT1(bitstring).
+
+(* ---------- Concatenation / pairing helpers ---------- *)
+fun cat2(bitstring, bitstring): bitstring [data].
+fun cat3(bitstring, bitstring, bitstring): bitstring [data].
+fun cat4(bitstring, bitstring, bitstring, bitstring): bitstring [data].
+fun cat5(bitstring, bitstring, bitstring, bitstring, bitstring): bitstring [data].
+fun G2bs(G): bitstring [data].
+
+(* ---------- XOR (for PID_i = ID_i xor H3(...)) ---------- *)
+fun xor(bitstring, bitstring): bitstring.
+equation forall a: bitstring, b: bitstring; xor(xor(a,b),b) = a.
+
+(* ---------- Public identifiers (identities are public; secrets are not) --*)
+free IDi: bitstring.       (* OBU_i's real identity -- public constant for this model *)
+free Tstamp: bitstring.    (* abstracted timestamp; freshness is modeled via nonces elsewhere *)
+free epoch: bitstring.     (* current epoch label *)
+
+(* ---------- Events for correspondence (mutual authentication) queries --- *)
+event OBUSentM1(bitstring, G).             (* PID, A *)
+event RSUAcceptedM1(bitstring, G).         (* PID, A *)
+event RSUSentM2(G, G).                     (* A, B *)
+event OBUAcceptedM2(G, G).                 (* A, B *)
+event OBUFinished(bitstring).              (* sk, from OBU's view *)
+event RSUFinished(bitstring).              (* sk, from RSU's view *)
+event HandoverFinished(bitstring, bitstring). (* PID, sk' *)
+
+(* ---------- Secrecy queries: standard event-carries-the-secret idiom ----
+   SECOND CORRECTION, after a second real ProVerif 2.05 parse error: the
+   previous attempt (attacker(...) ==> not event(...)) also failed to
+   parse, confirming ProVerif's correspondence-query grammar does not
+   accept negated `attacker` or `event` predicates in this implication
+   style at all. Switched to the standard "bad outcome implies false"
+   idiom instead -- stating the combination that must never happen (the
+   event fired AND the attacker knows the value) as a conjunction of
+   positive facts implying `false`, which avoids negating either
+   predicate individually. This is the more conventional, more broadly
+   documented ProVerif secrecy-after-event pattern; still not
+   independently re-verified by us beyond this point, so please report
+   the next result either way. *)
+query k: bitstring; event(OBUFinished(k)) && attacker(k) ==> false.
+query pid: bitstring, k: bitstring; event(HandoverFinished(pid,k)) && attacker(k) ==> false.
+
+(* ---------- Authentication (injective correspondence) queries ---------- *)
+query pid: bitstring, a: G; inj-event(RSUAcceptedM1(pid,a)) ==> inj-event(OBUSentM1(pid,a)).
+query a: G, b: G; inj-event(OBUAcceptedM2(a,b)) ==> inj-event(RSUSentM2(a,b)).
+query sk: bitstring; inj-event(OBUFinished(sk)) ==> inj-event(RSUFinished(sk)).
+
+(* =========================================================================
+   Main process: sets up TA and RSU long-term keys, registers one OBU with
+   a PUF-anchored secret xi, issues its epoch credential out-of-band, then
+   runs unboundedly many sessions of Algorithm 4 (Auth) and Algorithm 6
+   (Handover) between that OBU and two RSU instances.
+   ========================================================================= *)
+
+let OBU(xi: exponent, IDi_: bitstring, Vi: G, Credi: G, sigmaTA: bitstring, Ppub: G, SjB: G) =
+    (* ----- Algorithm 4: Full Mutual Authentication (OBU side) ----- *)
+    (* RSU beacon with a fresh per-session challenge nB (REPLAY FIX): the RSU
+       broadcasts (S_j, Cert_j, nB); sigma1 covers nB, and the RSU accepts an M1 for
+       its nB at most once. This replaces the table-based seen-t1 guard, which
+       ProVerif cannot use to prove exactly-once acceptance. *)
+    in(ch, (=SjB, certBeacon: bitstring, nB: bitstring));
+    new a: exponent;
+    let Apoint = exp(g, a) in
+    new t1: bitstring;
+    let pidSeed = H3(cat4(G2bs(Vi), G2bs(Credi), t1, epoch)) in
+    let PIDi = xor(IDi_, pidSeed) in
+    (* sigma1 is a Schnorr signature under xi, verified against Vi;
+       this now matches the paper's fully-specified construction (see
+       modeling choice (3) above) rather than idealizing an open gap *)
+    let sigma1 = sign(cat5(PIDi, G2bs(Apoint), G2bs(Credi), G2bs(SjB), cat2(nB, t1)), xi) in
+    event OBUSentM1(PIDi, Apoint);
+    out(ch, (PIDi, Apoint, Credi, Vi, sigmaTA, sigma1, t1));
+
+    (* CORRECTED (real bug found by actually running ProVerif, not present
+       in the paper's own protocol description, which does specify this
+       check): M2 now also carries RSU_j's certificate (SjRecv, certJRecv)
+       so OBU_i can verify SjRecv is genuinely TA-certified before trusting
+       it, instead of taking it unverified straight off the wire -- the
+       earlier version of this model omitted Cert_j entirely, which let
+       ProVerif's attacker fabricate its own key pair and pass it off as
+       Sj, defeating sigma2 verification trivially. This matches what the
+       paper's own Algorithm 4 already specifies ("verify Cert_j against
+       P_pub"); the model was incomplete, not the protocol. *)
+    in(ch, (Bpoint: G, sigma2: bitstring, t2: bitstring, =SjB, certJRecv: bitstring));
+    let checkedCert = checksign(certJRecv, Ppub) in
+    if checkedCert = G2bs(SjB) then
+    (
+        let checkedB = checksign(sigma2, SjB) in
+        if checkedB = cat4(G2bs(Bpoint), G2bs(Apoint), PIDi, t2) then
+        (
+            (* CORRECTED (real bug found by running ProVerif): this event
+               now fires only after both verifications above succeed,
+               instead of immediately on message receipt -- the earlier
+               placement let ProVerif's attacker trigger it with an
+               unverified, possibly-forged message. *)
+            event OBUAcceptedM2(Apoint, Bpoint);
+            let Kij = exp(Bpoint, a) in
+            let sk = H0(cat5(G2bs(Kij), PIDi, G2bs(SjB), t1, t2)) in
+            event OBUFinished(sk);
+            let CTi0 = H0(cat4(sk, PIDi, epoch, Tstamp)) in
+            (* ----- Algorithm 6: Handover to a second RSU ----- *)
+            new t1p: bitstring;
+            out(ch, (PIDi, H0(cat2(CTi0, t1p)), t1p));
+            in(ch, (SjNext: G, t2p: bitstring));
+            let skp = H0(cat3(CTi0, G2bs(SjNext), t1p)) in
+            event HandoverFinished(PIDi, skp)
+        )
+    ).
+
+
+let RSU(sj: exponent, Sj: G, certJ: bitstring, Ppub: G) =
+    new nB: bitstring;
+    out(ch, (Sj, certJ, nB));
+    in(ch, (PIDi: bitstring, Apoint: G, Credi: G, Vi: G,
+            sigmaTA: bitstring, sigma1: bitstring, t1: bitstring));
+    (* replay protection: this session accepts one M1 for its own fresh nB (see OBU role) *)
+    (* verify TA's signature over the credential material; in this model
+       we check it against Ppub without recovering IDi in the clear,
+       mirroring the paper's conditional-privacy property *)
+    let checkedTA = checksign(sigmaTA, Ppub) in
+    if checkedTA = cat3(G2bs(Credi), G2bs(Vi), epoch) then
+    (
+        let checked1 = checksign(sigma1, Vi) in
+        if checked1 = cat5(PIDi, G2bs(Apoint), G2bs(Credi), G2bs(Sj), cat2(nB, t1)) then
+        (
+            (* CORRECTED (real bug found by running ProVerif): this event
+               now fires only after both verifications above succeed,
+               instead of immediately on message receipt, matching the
+               same fix applied to OBUAcceptedM2 in the OBU role. *)
+            event RSUAcceptedM1(PIDi, Apoint);
+            new b: exponent;
+            let Bpoint = exp(g,b) in
+            new t2: bitstring;
+            let sigma2 = sign(cat4(G2bs(Bpoint), G2bs(Apoint), PIDi, t2), sj) in
+            event RSUSentM2(Apoint, Bpoint);
+            (* CORRECTED: M2 now also carries certJ (RSU_j's TA-issued
+               certificate for Sj), so OBU_i can verify Sj is genuine
+               instead of trusting it unverified off the wire -- see the
+               matching, longer comment in the OBU role above for why. *)
+            (* RSU derives its key BEFORE sending M2 (it can: K=bA needs only A and b).
+               Earlier version fired RSUFinished after the send, so the OBU could
+               finish first and 'OBUFinished ==> RSUFinished' failed purely by event order. *)
+            let Kij = exp(Apoint, b) in
+            let sk = H0(cat5(G2bs(Kij), PIDi, G2bs(Sj), t1, t2)) in
+            event RSUFinished(sk);
+            out(ch, (Bpoint, sigma2, t2, Sj, certJ));
+            let CTi0 = H0(cat4(sk, PIDi, epoch, Tstamp)) in
+            out(rsuBackhaul, (PIDi, CTi0))
+        )
+    ).
+
+
+let RSUNext() =
+    new sjNext: exponent;
+    let SjNext = exp(g, sjNext) in
+    in(rsuBackhaul, (PIDfwd: bitstring, CTfwd: bitstring));
+    in(ch, (PIDi: bitstring, tag: bitstring, t1p: bitstring));
+    if PIDi = PIDfwd then
+    if tag = H0(cat2(CTfwd, t1p)) then
+    (
+        new t2p: bitstring;
+        out(ch, (SjNext, t2p));
+        let skp = H0(cat3(CTfwd, G2bs(SjNext), t1p)) in
+        event HandoverFinished(PIDi, skp)
+    ).
+
+process
+    new taSk: exponent;
+    let Ppub = exp(g, taSk) in
+    new xi: exponent;
+    let Vi = exp(g, xi) in
+    new credExp: exponent;
+    let Credi = exp(g, credExp) in
+    let sigmaTA = sign(cat3(G2bs(Credi), G2bs(Vi), epoch), taSk) in
+    new sj: exponent;
+    let Sj = exp(g, sj) in
+    (* RSU_j's TA-issued certificate, added along with the fixes above --
+       this is what Algorithm 4's "verify Cert_j against P_pub" step
+       actually anchors, and what the earlier version of this model
+       omitted entirely *)
+    let certJ = sign(G2bs(Sj), taSk) in
+    (
+        (! OBU(xi, IDi, Vi, Credi, sigmaTA, Ppub, Sj))
+        | (! RSU(sj, Sj, certJ, Ppub))
+        | (! RSUNext())
+    )

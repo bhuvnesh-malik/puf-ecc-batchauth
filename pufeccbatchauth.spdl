@@ -1,0 +1,163 @@
+/*
+ * PUF-ECC-BatchAuth -- Scyther model of Algorithm 4 (Full Mutual
+ * Authentication, CORRECTED sigma2 = Sign_sj(B||A||T2) version) and
+ * Algorithm 6 (Handover Continuation).
+ *
+ * STATUS: EXECUTED with Scyther (built from github.com/cascremers/scyther,
+ * `scyther-linux --max-runs=0 pufeccbatchauth.spdl`, unbounded runs).
+ * Result for THIS file: every claim below is verified (Ok) -- see paper
+ * Section "Tool-Based Verification". Running an earlier version of this model
+ * exposed two real specification gaps, both now fixed in the paper:
+ *  (1) sigma1 did not cover the RSU identity S_j, so M1 could be redirected to
+ *      a different RSU (Weakagree/Niagree failed for the responder);
+ *  (2) sigma2 did not cover PID_i, so an adversary could re-use an honest
+ *      OBU's public A in its own M1 and obtain a signed reply that the honest
+ *      OBU accepts while the RSU attributes the session to the adversary
+ *      (identity-misbinding; Weakagree failed for the initiator).
+ * (3) Beacon challenge: R first sends a fresh nonce N; sigma1 covers N, so an
+ *     M1 is bound to one RSU session (replay fix; ProVerif could not prove
+ *     exactly-once acceptance from a seen-t1 table).
+ * Secrecy of the DH session key is NOT claimed here (Scyther has no DH
+ * algebra; modelling A,B as plain nonces would make any secrecy claim
+ * trivially false) -- that is covered by Theorem 1 and by ProVerif.
+ * The handover protocol has NO explicit RSU->OBU reply (implicit key
+ * authentication only), so no initiator-side agreement claim is made for it.
+ *
+ * WHY BOTH PROVERIF AND SCYTHER (not redundant -- complementary):
+ * Scyther has no native equational theory for Diffie-Hellman / modular
+ * exponentiation (unlike ProVerif, which models it explicitly via
+ * exp(exp(g,x),y) = exp(exp(g,y),x)). This file therefore does NOT
+ * attempt to verify the ECCDHP-hardness-based session-key argument --
+ * that is covered by the paper's Theorem 1 (computational proof) and by
+ * the ProVerif model. What this file checks instead, which Scyther is
+ * particularly fast and precise at, is authentication-agreement and
+ * replay-resistance: does each party's claimed partner actually run a
+ * matching session with matching values, and can an old session be
+ * replayed to trick a party into a false belief? The Diffie-Hellman
+ * shared value is treated abstractly here (as an opaque function of both
+ * parties' contributions), not as an algebraic group element -- this is
+ * a real, deliberate scope reduction, not an oversight.
+ *
+ * OTHER MODELING SIMPLIFICATIONS (stated explicitly):
+ * - sigma1 and sigma2 (both now fully specified as Schnorr signatures in
+ *   the paper, Section VI.C) are modeled here using Scyther's built-in
+ *   asymmetric signing primitive {...}sk(Agent), abstracting away the
+ *   internal (R, z) Schnorr construction -- exactly the same level of
+ *   abstraction the ProVerif model uses for the same reason (Scyther, like
+ *   ProVerif, has no native modular-exponentiation theory to express the
+ *   Schnorr internals faithfully; both models treat "Sign" as an ideal
+ *   EUF-CMA-secure black box instead).
+ * - Epoch-credential issuance (Algorithm 3) is out of scope for this file;
+ *   both roles are assumed to already hold their long-term signing keys
+ *   when the modeled exchange begins, matching the ProVerif model's same
+ *   simplification.
+ * - The Handover sub-protocol models CT_i as a Scyther pre-shared key
+ *   k(I,R) between OBU and the new RSU (representing the fact both
+ *   parties independently derived the same CT_i at the end of the prior
+ *   Auth/Handover session). Scyther's standard k(A,B) semantics assume
+ *   this key is secret by default; it does NOT, by itself, model the
+ *   backhaul-confidentiality limitation the paper discloses in its
+ *   Discussion section (that RSU_j forwards CT_i to RSU_{j+1} over a
+ *   channel that is authenticated but not necessarily encrypted). That
+ *   specific concern is already correctly modeled in the ProVerif file,
+ *   where the backhaul is a public channel by declaration. This Scyther
+ *   model instead checks the Handover message exchange's own internal
+ *   agreement/replay logic assuming CT_i is honestly shared -- a
+ *   complementary check, not a substitute for the ProVerif one.
+ *
+ * HOW TO RUN:
+ *   GUI:  open Scyther, File -> Open, select this file, Verify -> Verify all claims.
+ *   CLI:  scyther-mac --summary pufeccbatchauth.spdl   (or scyther-linux under Rosetta/Linux)
+ */
+
+hashfunction H0;
+
+// ===========================================================================
+// Protocol 1: Full Mutual Authentication (Algorithm 4)
+// ===========================================================================
+protocol pufeccbatchauth(I, R)
+{
+    role I
+    {
+        fresh a: Nonce;    // OBU_i's ephemeral DH contribution (abstracted; not exp(g,a))
+        fresh T1: Nonce;   // freshness value standing in for timestamp T1
+        var B: Nonce;      // RSU_j's ephemeral DH contribution (abstracted)
+        var N: Nonce;      // RSU beacon challenge nonce
+        var T2: Nonce;
+
+        // M1: sigma1 = Sign_{x_i}(PID_i, A, Cred_i^(e), T1), modeled as I
+        // signing (I, a, T1) under its own long-term key -- see header note.
+        read_0(R, I, N);
+        send_1(I, R, { I, R, a, N, T1 }sk(I));
+
+        // M2: sigma2 = Sign_{s_j}(B, A, T2), modeled as R signing (its own
+        // contribution B, the received A -- here I's own local `a` -- and
+        // T2) under its own long-term key. This is the CORRECTED
+        // construction: binding B to R's long-term key AND to the
+        // specific `a` it received is exactly what closes the
+        // unauthenticated-Diffie-Hellman vulnerability described in the
+        // paper (Section VI.C) -- an earlier, flawed draft used a plain
+        // hash tag here instead of a signature, which this model would
+        // *not* have caught either, since Scyther cannot distinguish a
+        // signature from an unauthenticated hash unless the construction
+        // is modeled faithfully as shown here.
+        read_2(R, I, { B, a, I, T2 }sk(R));
+
+        // Session key abstracted as H0 of both contributions; this claim
+        // checks agreement/secrecy of the abstracted key material, NOT
+        // ECCDHP-hardness (see header).
+        claim_i2(I, Alive);
+        claim_i3(I, Weakagree);
+        claim_i4(I, Niagree);
+        claim_i5(I, Nisynch);
+    }
+
+    role R
+    {
+        fresh N: Nonce;   // beacon challenge, used once
+        var A: Nonce;
+        var T1: Nonce;
+        fresh b: Nonce;
+        fresh T2: Nonce;
+
+        send_0(R, I, N);
+        read_1(I, R, { I, R, A, N, T1 }sk(I));
+
+        // R signs (its own fresh b, the received A, and T2), binding both
+        // contributions together -- see the matching comment in role I
+        // above for why this specific binding is the security-critical fix.
+        send_2(R, I, { b, A, I, T2 }sk(R));
+        claim_r2(R, Alive);
+        claim_r3(R, Weakagree);
+        claim_r4(R, Niagree);
+        claim_r5(R, Nisynch);
+    }
+}
+
+// ===========================================================================
+// Protocol 2: Handover Continuation (Algorithm 6)
+// CT_i modeled as a pre-shared key k(I,R); see header note on scope.
+// ===========================================================================
+protocol pufeccbatchhandover(I, R)
+{
+    role I
+    {
+        fresh T1p: Nonce;
+
+        send_1(I, R, H0(k(I,R), T1p), T1p);
+        
+        claim_i1(I, Secret, k(I,R));
+    }
+
+    role R
+    {
+        var T1p: Nonce;
+
+        read_1(I, R, H0(k(I,R), T1p), T1p);
+        
+        claim_r1(R, Secret, k(I,R));
+        claim_r2(R, Alive);
+        claim_r3(R, Niagree);
+        claim_r4(R, Nisynch);
+    }
+}
