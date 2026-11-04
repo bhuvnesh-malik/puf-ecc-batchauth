@@ -22,5 +22,3 @@ Scyther: all 13 claims **Ok**.
 Scyther has no Diffie-Hellman algebra, so DH secrecy is covered by the paper's proof and by ProVerif. Signatures are ideal. Performance figures in the paper are analytical, not hardware measurements.
 
 
-## Licence
-MIT (see `LICENSE`).
